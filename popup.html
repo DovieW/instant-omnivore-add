@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Instant Omnivore Add</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="titleblock">
+          <h1>Instant Omnivore Add</h1>
+          <p class="subtitle">Map shortcut slots to Omnivore labels</p>
+        </div>
+
+        <div class="actions">
+          <div class="actions__row">
+            <button id="save" class="btn btn--primary" type="button">Save</button>
+            <button
+              id="openShortcuts"
+              class="btn btn--ghost"
+              type="button"
+              title="Open Chrome shortcut settings"
+            >
+              Shortcuts
+            </button>
+          </div>
+          <span id="status" class="status" aria-live="polite"></span>
+        </div>
+      </header>
+
+      <main class="card">
+        <section class="settings" aria-label="Omnivore settings">
+          <details id="configAccordion" class="accordion">
+            <summary class="accordion__summary">
+              <span class="accordion__summaryText">
+                <span class="accordion__title">Connection</span>
+                <span class="accordion__meta">API + web URLs and key</span>
+              </span>
+              <span class="accordion__chevron" aria-hidden="true"></span>
+            </summary>
+
+            <div class="accordion__body">
+              <div class="field">
+                <label class="field__label" for="apiServerUrl">API server URL</label>
+                <input
+                  id="apiServerUrl"
+                  inputmode="url"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="https://api-prod.omnivore.app"
+                />
+                <div class="field__hint">Base URL only. The extension will call <code>/api/graphql</code> on this server.</div>
+              </div>
+
+              <div class="field">
+                <label class="field__label" for="webServerUrl">Web app URL</label>
+                <input
+                  id="webServerUrl"
+                  inputmode="url"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="https://omnivore.app"
+                />
+                <div class="field__hint">Used when opening pulled items in the Omnivore reader (e.g. <code>/me/&lt;slug&gt;</code>).</div>
+              </div>
+
+              <div class="field">
+                <label class="field__label" for="apiKey">API key / Authorization</label>
+                <input
+                  id="apiKey"
+                  type="password"
+                  inputmode="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="Paste your API token here"
+                />
+                <div class="field__hint">
+                  Stored in Chrome sync storage. Whatever you paste is sent as the <code>Authorization</code> header.
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <label class="toggle" for="openPulledInOriginal">
+            <input id="openPulledInOriginal" type="checkbox" />
+            <span class="toggle__ui" aria-hidden="true"></span>
+            <span class="toggle__text">
+              Open pulled items in original article
+              <span class="toggle__hint">Open original page to article.</span>
+            </span>
+          </label>
+
+          <label class="toggle" for="closeTabAfterSave">
+            <input id="closeTabAfterSave" type="checkbox" />
+            <span class="toggle__ui" aria-hidden="true"></span>
+            <span class="toggle__text">
+              Close tab after saving current tab
+              <span class="toggle__hint">Never closes when saving a hovered link.</span>
+            </span>
+          </label>
+
+          <div class="field" aria-label="Exclusions">
+            <label class="field__label" for="excludedDomains">Excluded domains</label>
+            <input
+              id="excludedDomains"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="mail.google.com, calendar.google.com"
+            />
+            <div class="field__hint">
+              Comma-separated. Blocks saving/closing the current tab on these domains (including subdomains). Hovered links still save.
+            </div>
+          </div>
+
+          <label class="toggle" for="deleteOnOpen">
+            <input id="deleteOnOpen" type="checkbox" />
+            <span class="toggle__ui" aria-hidden="true"></span>
+            <span class="toggle__text">
+              Delete pulled items after opening
+              <span class="toggle__hint">Remove item from your Omnivore library after it's opened.</span>
+            </span>
+          </label>
+        </section>
+
+        <div class="note" role="note">
+          <div class="note__title">Slots → Labels</div>
+          <div class="note__body">
+            Each slot can be a label name. When you save, the page is added to Omnivore and that label is created if needed.
+            Leave a slot blank to save without a label.
+            Use <code>Alt+Shift+N</code> to open the oldest matching item and remove it from Omnivore.
+          </div>
+        </div>
+
+        <ol class="slots" aria-label="Slot label names">
+          <li class="row">
+            <span class="badge">1</span>
+            <label class="lab" for="slot1">Label</label>
+            <input id="slot1" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+          <li class="row">
+            <span class="badge">2</span>
+            <label class="lab" for="slot2">Label</label>
+            <input id="slot2" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+          <li class="row">
+            <span class="badge">3</span>
+            <label class="lab" for="slot3">Label</label>
+            <input id="slot3" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+          <li class="row">
+            <span class="badge">4</span>
+            <label class="lab" for="slot4">Label</label>
+            <input id="slot4" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+          <li class="row">
+            <span class="badge">5</span>
+            <label class="lab" for="slot5">Label</label>
+            <input id="slot5" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+          <li class="row">
+            <span class="badge">6</span>
+            <label class="lab" for="slot6">Label</label>
+            <input id="slot6" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+          <li class="row">
+            <span class="badge">7</span>
+            <label class="lab" for="slot7">Label</label>
+            <input id="slot7" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
+          </li>
+        </ol>
+      </main>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
