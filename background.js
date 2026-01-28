@@ -632,6 +632,63 @@ mutation SavePage($input: SavePageInput!) {
 }
 `;
 
+async function savePageToOmnivoreForUrl({ url, title, label, source = "bookmark-import" }) {
+  await ensureSettingsLoaded();
+
+  if (!cachedApiServerUrl || !cachedApiKey) {
+    return { ok: false, error: "missing-config" };
+  }
+
+  if (!isHttpUrl(url)) {
+    return { ok: false, error: "unsupported-url" };
+  }
+
+  const cleanTitle = (title || "").trim() || url;
+
+  // Best-effort: fetch HTML in the background. If it fails (CORS, blocked, non-HTML),
+  // still send a minimal HTML shell.
+  let originalContent = await fetchPageHtml(url);
+  if (!originalContent) {
+    originalContent = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(
+      cleanTitle
+    )}</title></head><body></body></html>`;
+  }
+
+  const clientRequestId = newClientRequestId();
+  const input = {
+    clientRequestId,
+    source,
+    url,
+    title: cleanTitle,
+    originalContent,
+    ...(label ? { labels: [{ name: label }] } : {}),
+  };
+
+  const tryOnce = async (apiKey) =>
+    omnivoreGraphQL({
+      apiServerUrl: cachedApiServerUrl,
+      apiKey,
+      query: MUTATION_SAVE_PAGE,
+      variables: { input },
+    });
+
+  let result = await tryOnce(cachedApiKey);
+  if (!result.ok) return result;
+
+  const saveResult = result.data?.savePage ?? null;
+  const typename = saveResult?.__typename;
+
+  if (typename === "SaveSuccess") return { ok: true };
+
+  if (typename === "SaveError") {
+    const errorCodes = Array.isArray(saveResult?.errorCodes) ? saveResult.errorCodes : [];
+    const message = typeof saveResult?.message === "string" ? saveResult.message : "";
+    return { ok: false, error: "save-error", errorCodes, message };
+  }
+
+  return { ok: false, error: "api-error", data: result.data, raw: result.raw };
+}
+
 async function saveUrlToOmnivore({ url, title, label }) {
   await ensureSettingsLoaded();
 
@@ -711,6 +768,33 @@ async function saveUrlToOmnivore({ url, title, label }) {
   return { ok: false, error: "api-error", data: result.data, raw: result.raw };
 }
 
+async function saveBookmarkToOmnivorePreferUrl({ url, title, label }) {
+  // Prefer saveUrl for speed during imports, but fall back to savePage for reliability.
+  // We only do the heavier savePage path when saveUrl fails.
+  const r = await saveUrlToOmnivore({ url, title, label });
+  if (r.ok) return r;
+
+  const msg = typeof r.message === "string" ? r.message : "";
+  const shouldFallback =
+    r.error === "graphql" ||
+    r.error === "network" ||
+    (r.error === "http" && Number(r.status) >= 500) ||
+    /unexpected server error/i.test(msg);
+
+  if (!shouldFallback) return r;
+
+  const fallback = await savePageToOmnivoreForUrl({ url, title, label, source: "bookmark-import" });
+  if (fallback.ok) {
+    console.info("[instant-omnivore-add] savePage fallback succeeded for import", url);
+    return fallback;
+  }
+
+  // Return the fallback result only if it contains more useful information; otherwise keep original.
+  const fbMsg = typeof fallback.message === "string" ? fallback.message : "";
+  if (fbMsg && fbMsg !== msg) return fallback;
+  return r;
+}
+
 function describeImportFailure(r) {
   if (!r || typeof r !== "object") return "unknown";
   if (r.error === "graphql" || r.error === "http") {
@@ -757,7 +841,7 @@ async function importBookmarksFromFolder({ folderPath, label }) {
   const errors = [];
 
   for (const b of attemptedItems) {
-    const r = await saveUrlToOmnivore({ url: b.url, title: b.title, label: cleanLabel });
+    const r = await saveBookmarkToOmnivorePreferUrl({ url: b.url, title: b.title, label: cleanLabel });
     if (r.ok) {
       added += 1;
     } else {
