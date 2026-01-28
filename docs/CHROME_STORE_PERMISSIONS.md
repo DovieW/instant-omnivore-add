@@ -53,6 +53,19 @@ We only act when you trigger a keyboard shortcut (or open/pull behavior). We are
 
 ---
 
+## `bookmarks`
+
+### Why it’s needed
+We provide an optional “Bookmark folder → Label” helper in the popup:
+- you paste a **bookmarks folder path** (or folder ID)
+- you choose an **Omnivore label**
+- the extension reads bookmark URLs inside that folder and saves them to Omnivore in bulk
+
+### What the user should understand
+We only read bookmarks when you click the **Add** button in the popup. The extension uses the bookmark URLs solely to send them to your configured Omnivore server.
+
+---
+
 ## `scripting`
 
 ### Why it’s needed

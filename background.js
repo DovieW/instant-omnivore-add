@@ -355,6 +355,151 @@ function asBearerToken(raw) {
   return `Bearer ${t}`;
 }
 
+function normalizeBookmarkPath(raw) {
+  if (typeof raw !== "string") return "";
+  return raw
+    .trim()
+    .replace(/^\s*\/+/, "")
+    .replace(/\/+\s*$/, "")
+    .replace(/\s*\/\s*/g, "/");
+}
+
+function extractBookmarkFolderId(raw) {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (!s) return null;
+
+  // Accept plain numeric IDs.
+  if (/^\d+$/.test(s)) return s;
+
+  // Accept Chrome bookmark manager URLs like: chrome://bookmarks/?id=1118
+  // (and tolerate users pasting just "?id=1118" or "id=1118").
+  try {
+    if (/^chrome:\/\/bookmarks\b/i.test(s)) {
+      const u = new URL(s);
+      const id = u.searchParams.get("id");
+      if (id && /^\d+$/.test(id)) return id;
+    }
+  } catch {
+    // fall through to regex parsing
+  }
+
+  const m = /(?:\?|&|^)id=(\d+)(?:&|$)/i.exec(s);
+  if (m?.[1]) return m[1];
+  return null;
+}
+
+function splitBookmarkPath(path) {
+  const clean = normalizeBookmarkPath(path);
+  if (!clean) return [];
+  return clean
+    .split("/")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function bookmarkTitleMatches(a, b) {
+  return String(a || "")
+    .trim()
+    .toLowerCase() === String(b || "").trim().toLowerCase();
+}
+
+function walkBookmarkNodes(children, segments) {
+  // Walk a *path* through the tree: each segment must match a direct child
+  // folder of the previous segment.
+  let curChildren = Array.isArray(children) ? children : [];
+  let node = null;
+
+  for (const seg of segments) {
+    const found = curChildren.find((n) => n && !n.url && bookmarkTitleMatches(n.title, seg));
+    if (!found) return null;
+    node = found;
+    curChildren = Array.isArray(found.children) ? found.children : [];
+  }
+
+  return node;
+}
+
+function findFoldersByTitle(rootNode, title) {
+  const out = [];
+  const stack = [rootNode];
+  while (stack.length) {
+    const n = stack.pop();
+    if (!n || typeof n !== "object") continue;
+    if (!n.url && bookmarkTitleMatches(n.title, title)) out.push(n);
+    if (Array.isArray(n.children)) {
+      for (const c of n.children) stack.push(c);
+    }
+  }
+  return out;
+}
+
+async function resolveBookmarkFolder({ folderPath }) {
+  const folderId = extractBookmarkFolderId(folderPath);
+  if (folderId) {
+    try {
+      const sub = await chrome.bookmarks.getSubTree(folderId);
+      const node = sub?.[0] ?? null;
+      if (node && !node.url) return { ok: true, node };
+      return { ok: false, error: "folder-not-found" };
+    } catch {
+      return { ok: false, error: "folder-not-found" };
+    }
+  }
+
+  const cleanPath = normalizeBookmarkPath(folderPath);
+  if (!cleanPath) return { ok: false, error: "missing-folder-path" };
+
+  const segments = splitBookmarkPath(cleanPath);
+  if (!segments.length) return { ok: false, error: "missing-folder-path" };
+
+  try {
+    const tree = await chrome.bookmarks.getTree();
+    const rootChildren = tree?.[0]?.children ?? [];
+
+    // 1) Exact path from root children.
+    const direct = walkBookmarkNodes(rootChildren, segments);
+    if (direct && !direct.url) return { ok: true, node: direct };
+
+    // 2) If the user omitted the root (e.g. "Reading/Inbox"), try each root folder.
+    const candidates = [];
+    for (const root of rootChildren) {
+      if (!root || root.url || !Array.isArray(root.children)) continue;
+      const match = walkBookmarkNodes(root.children, segments);
+      if (match && !match.url) candidates.push(match);
+    }
+    if (candidates.length === 1) return { ok: true, node: candidates[0] };
+
+    // 3) If it's a single segment, allow a unique folder match anywhere.
+    if (segments.length === 1) {
+      const matches = findFoldersByTitle(tree?.[0], segments[0]);
+      if (matches.length === 1) return { ok: true, node: matches[0] };
+    }
+
+    return { ok: false, error: "folder-not-found" };
+  } catch (e) {
+    console.error("[instant-omnivore-add] resolveBookmarkFolder failed", e);
+    return { ok: false, error: "bookmarks-unavailable" };
+  }
+}
+
+function collectBookmarkUrls(node) {
+  const out = [];
+  const stack = [node];
+  while (stack.length) {
+    const n = stack.pop();
+    if (!n || typeof n !== "object") continue;
+    if (typeof n.url === "string" && n.url) {
+      out.push({ url: n.url, title: typeof n.title === "string" ? n.title : "" });
+      continue;
+    }
+    if (Array.isArray(n.children)) {
+      for (const c of n.children) stack.push(c);
+    }
+  }
+  return out;
+}
+
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -446,11 +591,16 @@ async function omnivoreGraphQL({ apiServerUrl, apiKey, query, variables }) {
 
     const json = await res.json().catch(() => null);
     if (!res.ok) {
-      return { ok: false, error: "http", status: res.status, json };
+      const msg =
+        (Array.isArray(json?.errors) && json.errors.map((e) => e?.message).filter(Boolean).join("; ")) ||
+        (typeof json?.message === "string" ? json.message : "") ||
+        `HTTP ${res.status}`;
+      return { ok: false, error: "http", status: res.status, message: msg, json };
     }
 
     if (json?.errors?.length) {
-      return { ok: false, error: "graphql", json };
+      const msg = Array.isArray(json?.errors) ? json.errors.map((e) => e?.message).filter(Boolean).join("; ") : "";
+      return { ok: false, error: "graphql", message: msg || "GraphQL error", json };
     }
 
     return { ok: true, data: json?.data ?? null, raw: json };
@@ -481,6 +631,167 @@ mutation SavePage($input: SavePageInput!) {
   }
 }
 `;
+
+async function saveUrlToOmnivore({ url, title, label }) {
+  await ensureSettingsLoaded();
+
+  if (!cachedApiServerUrl || !cachedApiKey) {
+    return { ok: false, error: "missing-config" };
+  }
+
+  if (!isHttpUrl(url)) {
+    return { ok: false, error: "unsupported-url" };
+  }
+
+  const clientRequestId = newClientRequestId();
+  const input = {
+    clientRequestId,
+    source: "bookmark-import",
+    url,
+    title: (title || "").trim() || url,
+    ...(label ? { labels: [{ name: label }] } : {}),
+  };
+
+  const tryOnce = async (apiKey) =>
+    omnivoreGraphQL({
+      apiServerUrl: cachedApiServerUrl,
+      apiKey,
+      query: MUTATION_SAVE_URL,
+      variables: { input },
+    });
+
+  let result = await tryOnce(cachedApiKey);
+  if (!result.ok) {
+    // Some deployments occasionally return transient 5xx/GraphQL errors.
+    // A single retry makes bulk imports much less flaky.
+    const isRetryable =
+      result.error === "network" ||
+      result.error === "graphql" ||
+      (result.error === "http" && Number(result.status) >= 500);
+
+    if (isRetryable) {
+      await sleep(220);
+      result = await tryOnce(cachedApiKey);
+    }
+
+    if (!result.ok) return result;
+  }
+
+  const saveResult = result.data?.saveUrl ?? null;
+  const typename = saveResult?.__typename;
+
+  if (typename === "SaveSuccess") {
+    return { ok: true };
+  }
+
+  if (typename === "SaveError") {
+    const errorCodes = Array.isArray(saveResult?.errorCodes) ? saveResult.errorCodes : [];
+    const message = typeof saveResult?.message === "string" ? saveResult.message : "";
+
+    const shouldTryBearerFallback =
+      !/^bearer\s+/i.test(cachedApiKey) && (errorCodes.includes("UNAUTHORIZED") || errorCodes.includes("UNKNOWN"));
+
+    if (shouldTryBearerFallback) {
+      const bearerKey = asBearerToken(cachedApiKey);
+      if (bearerKey && bearerKey !== cachedApiKey) {
+        const retry = await tryOnce(bearerKey);
+        if (retry.ok) {
+          const retrySave = retry.data?.saveUrl;
+          if (retrySave?.__typename === "SaveSuccess") {
+            console.info("[instant-omnivore-add] SaveUrl succeeded after Bearer fallback");
+            return { ok: true };
+          }
+        }
+      }
+    }
+
+    return { ok: false, error: "save-error", errorCodes, message };
+  }
+
+  return { ok: false, error: "api-error", data: result.data, raw: result.raw };
+}
+
+function describeImportFailure(r) {
+  if (!r || typeof r !== "object") return "unknown";
+  if (r.error === "graphql" || r.error === "http") {
+    const msg = typeof r.message === "string" ? r.message.trim() : "";
+    return msg || r.error;
+  }
+  if (r.error === "save-error") {
+    const codes = Array.isArray(r.errorCodes) ? r.errorCodes.filter(Boolean).join(", ") : "";
+    const msg = typeof r.message === "string" ? r.message.trim() : "";
+    return [codes, msg].filter(Boolean).join(" — ") || "save-error";
+  }
+  if (typeof r.error === "string") return r.error;
+  return "unknown";
+}
+
+async function importBookmarksFromFolder({ folderPath, label }) {
+  await ensureSettingsLoaded();
+
+  if (!cachedApiServerUrl || !cachedApiKey) {
+    return { ok: false, error: "missing-config" };
+  }
+
+  const cleanLabel = typeof label === "string" ? label.trim() : "";
+  if (!cleanLabel) return { ok: false, error: "missing-label" };
+
+  const folderRes = await resolveBookmarkFolder({ folderPath });
+  if (!folderRes.ok) return folderRes;
+
+  let subtree = null;
+  try {
+    const sub = await chrome.bookmarks.getSubTree(folderRes.node.id);
+    subtree = sub?.[0] ?? folderRes.node;
+  } catch {
+    subtree = folderRes.node;
+  }
+
+  const collected = collectBookmarkUrls(subtree);
+  const attemptedItems = collected.filter((b) => isHttpUrl(b.url));
+  const skippedUnsupported = collected.length - attemptedItems.length;
+
+  const attempted = attemptedItems.length;
+  let added = 0;
+  let failed = 0;
+  const errors = [];
+
+  for (const b of attemptedItems) {
+    const r = await saveUrlToOmnivore({ url: b.url, title: b.title, label: cleanLabel });
+    if (r.ok) {
+      added += 1;
+    } else {
+      failed += 1;
+      if (errors.length < 5) {
+        errors.push({ url: b.url, error: r.error, message: describeImportFailure(r) });
+      }
+    }
+
+    // Tiny delay to be friendly to self-hosted deployments.
+    await sleep(50);
+  }
+
+  if (attempted > 0 && failed === 0) {
+    await showOkBadge();
+  } else if (attempted > 0 && added > 0) {
+    await showWarnBadge();
+  }
+
+  // For backwards compatibility with earlier popup code:
+  // - total = attempted (http/https only)
+  // - skipped = failed
+  return {
+    ok: true,
+    totalFound: collected.length,
+    skippedUnsupported,
+    attempted,
+    total: attempted,
+    added,
+    failed,
+    skipped: failed,
+    errors,
+  };
+}
 
 const QUERY_SEARCH_ONE = `
 query Search($after: String, $first: Int, $query: String) {
@@ -786,7 +1097,7 @@ chrome.commands.onCommand.addListener((command) => {
   void handleCommand(command);
 });
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
   if (msg.type === "instant-omnivore:hoverUpdate") {
@@ -819,6 +1130,22 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     if (!Number.isFinite(curTs) || ts >= curTs) {
       lastHoveredByTab.delete(tabId);
     }
+  }
+
+  if (msg.type === "instant-omnivore:importBookmarks") {
+    // Popup action: import all bookmarks in a folder to a single label.
+    const folderPath = typeof msg.folderPath === "string" ? msg.folderPath : "";
+    const label = typeof msg.label === "string" ? msg.label : "";
+    (async () => {
+      try {
+        const res = await importBookmarksFromFolder({ folderPath, label });
+        sendResponse(res);
+      } catch (e) {
+        console.error("[instant-omnivore-add] importBookmarks crashed", e);
+        sendResponse({ ok: false, error: "exception" });
+      }
+    })();
+    return true;
   }
 });
 

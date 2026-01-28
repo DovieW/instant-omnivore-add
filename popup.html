@@ -171,6 +171,45 @@
             <input id="slot7" inputmode="text" autocomplete="off" spellcheck="false" placeholder="(optional)" />
           </li>
         </ol>
+
+        <div class="divider" role="separator" aria-hidden="true"></div>
+
+        <section class="import" aria-label="Bookmark folder import">
+          <div class="import__title">Bookmark folder → Label</div>
+          <div class="import__hint">
+            Paste a bookmarks folder path (example: <code>Bookmarks bar/Reading</code>) <em>or</em> a folder ID/URL (example:
+            <code>1118</code> or <code>chrome://bookmarks/?id=1118</code>) and a label.
+            Clicking <strong>Add</strong> will save every bookmark URL in that folder to Omnivore with that label.
+          </div>
+
+          <div class="import__row">
+            <div class="field">
+              <label class="field__label" for="bookmarkFolderPath">Bookmarks folder path</label>
+              <input
+                id="bookmarkFolderPath"
+                inputmode="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Bookmarks bar/Reading"
+              />
+            </div>
+
+            <div class="field">
+              <label class="field__label" for="bookmarkImportLabel">Label</label>
+              <input
+                id="bookmarkImportLabel"
+                inputmode="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="reading"
+              />
+            </div>
+          </div>
+
+          <div class="import__actions">
+            <button id="importBookmarks" class="btn btn--primary" type="button">Add</button>
+          </div>
+        </section>
       </main>
     </div>
 

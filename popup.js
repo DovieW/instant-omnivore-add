@@ -10,6 +10,9 @@ const DELETE_ON_OPEN_KEY = "instantOmnivore.deleteOnOpen.v1";
 const CLOSE_TAB_KEY = "instantOmnivore.closeTabAfterSave.v1";
 const EXCLUDED_DOMAINS_KEY = "instantOmnivore.excludedDomains.v1";
 
+const BOOKMARK_IMPORT_FOLDER_KEY = "instantOmnivore.bookmarkImportFolderPath.v1";
+const BOOKMARK_IMPORT_LABEL_KEY = "instantOmnivore.bookmarkImportLabel.v1";
+
 const DEFAULT_EXCLUDED_DOMAINS = "mail.google.com, www.google.com";
 
 const LAST_OUTCOME_KEY = "instantOmnivore.lastOutcome.v1";
@@ -29,6 +32,10 @@ const openPulledInOriginalEl = document.getElementById("openPulledInOriginal");
 const closeTabAfterSaveEl = document.getElementById("closeTabAfterSave");
 const excludedDomainsEl = document.getElementById("excludedDomains");
 const deleteOnOpenEl = document.getElementById("deleteOnOpen");
+
+const bookmarkFolderPathEl = document.getElementById("bookmarkFolderPath");
+const bookmarkImportLabelEl = document.getElementById("bookmarkImportLabel");
+const importBookmarksBtn = document.getElementById("importBookmarks");
 
 const inputs = Array.from({ length: SLOT_COUNT }, (_, i) => document.getElementById(`slot${i + 1}`));
 
@@ -70,6 +77,8 @@ async function load() {
     DELETE_ON_OPEN_KEY,
     CLOSE_TAB_KEY,
     EXCLUDED_DOMAINS_KEY,
+    BOOKMARK_IMPORT_FOLDER_KEY,
+    BOOKMARK_IMPORT_LABEL_KEY,
   ]);
 
   const labels = normalizeLabels(out[LABELS_KEY] ?? Array(SLOT_COUNT).fill(""));
@@ -90,6 +99,8 @@ async function load() {
   const deleteOnOpen = typeof out[DELETE_ON_OPEN_KEY] === "boolean" ? out[DELETE_ON_OPEN_KEY] : false;
   const closeTabAfterSave = typeof out[CLOSE_TAB_KEY] === "boolean" ? out[CLOSE_TAB_KEY] : false;
   const excludedDomains = typeof out[EXCLUDED_DOMAINS_KEY] === "string" ? out[EXCLUDED_DOMAINS_KEY] : DEFAULT_EXCLUDED_DOMAINS;
+  const bookmarkFolderPath = typeof out[BOOKMARK_IMPORT_FOLDER_KEY] === "string" ? out[BOOKMARK_IMPORT_FOLDER_KEY] : "";
+  const bookmarkImportLabel = typeof out[BOOKMARK_IMPORT_LABEL_KEY] === "string" ? out[BOOKMARK_IMPORT_LABEL_KEY] : "";
 
   writeUI(labels);
   apiServerUrlEl.value = apiServerUrl;
@@ -99,6 +110,9 @@ async function load() {
   closeTabAfterSaveEl.checked = Boolean(closeTabAfterSave);
   excludedDomainsEl.value = excludedDomains;
   deleteOnOpenEl.checked = Boolean(deleteOnOpen);
+
+  if (bookmarkFolderPathEl) bookmarkFolderPathEl.value = bookmarkFolderPath;
+  if (bookmarkImportLabelEl) bookmarkImportLabelEl.value = bookmarkImportLabel;
 
   // Keep the connection settings collapsed by default, but open it on brand-new installs
   // where none of the required config fields are filled out yet.
@@ -150,7 +164,7 @@ async function load() {
   }
 }
 
-async function save() {
+async function save({ silent = false } = {}) {
   const labels = readUI();
 
   const openInOriginal = Boolean(openPulledInOriginalEl.checked);
@@ -166,9 +180,11 @@ async function save() {
     [CLOSE_TAB_KEY]: Boolean(closeTabAfterSaveEl.checked),
     [EXCLUDED_DOMAINS_KEY]: (excludedDomainsEl.value || "").trim(),
     [DELETE_ON_OPEN_KEY]: Boolean(deleteOnOpenEl.checked),
+    [BOOKMARK_IMPORT_FOLDER_KEY]: (bookmarkFolderPathEl?.value || "").trim(),
+    [BOOKMARK_IMPORT_LABEL_KEY]: (bookmarkImportLabelEl?.value || "").trim(),
   });
 
-  setStatus("Saved");
+  if (!silent) setStatus("Saved");
 }
 
 let debounceId = null;
@@ -199,6 +215,65 @@ openPulledInOriginalEl.addEventListener("change", queueAutosave);
 closeTabAfterSaveEl.addEventListener("change", queueAutosave);
 excludedDomainsEl.addEventListener("input", queueAutosave);
 deleteOnOpenEl.addEventListener("change", queueAutosave);
+
+bookmarkFolderPathEl?.addEventListener("input", queueAutosave);
+bookmarkImportLabelEl?.addEventListener("input", queueAutosave);
+
+importBookmarksBtn?.addEventListener("click", async () => {
+  const folderPath = (bookmarkFolderPathEl?.value || "").trim();
+  const label = (bookmarkImportLabelEl?.value || "").trim();
+
+  if (!folderPath || !label) {
+    setStatus("⚠️ Enter folder path + label", { clearAfterMs: 4500 });
+    return;
+  }
+
+  // Persist inputs (and any other changes) before running.
+  await save({ silent: true });
+
+  try {
+    importBookmarksBtn.disabled = true;
+    setStatus("Adding bookmarks…", { clearAfterMs: 0 });
+
+    const res = await chrome.runtime.sendMessage({
+      type: "instant-omnivore:importBookmarks",
+      folderPath,
+      label,
+    });
+
+    if (!res || typeof res !== "object") {
+      setStatus("⛔ Import failed", { clearAfterMs: 6500 });
+      return;
+    }
+
+    if (res.ok) {
+      const added = Number.isFinite(Number(res.added)) ? Number(res.added) : 0;
+
+      // Newer background returns attempted/failed/skippedUnsupported.
+      const attempted = Number.isFinite(Number(res.attempted)) ? Number(res.attempted) : (Number.isFinite(Number(res.total)) ? Number(res.total) : 0);
+      const failed = Number.isFinite(Number(res.failed)) ? Number(res.failed) : (Number.isFinite(Number(res.skipped)) ? Number(res.skipped) : 0);
+      const skippedUnsupported = Number.isFinite(Number(res.skippedUnsupported)) ? Number(res.skippedUnsupported) : 0;
+
+      const parts = [`✓ Added ${added}/${attempted || 0}`];
+      if (failed) {
+        const firstMsg = Array.isArray(res.errors) && res.errors[0] && typeof res.errors[0].message === "string" ? res.errors[0].message : "";
+        parts.push(`failed ${failed}${firstMsg ? `: ${firstMsg}` : ""}`);
+      }
+      if (skippedUnsupported) parts.push(`skipped ${skippedUnsupported} non-web URLs`);
+
+      setStatus(parts.join(" • "), { clearAfterMs: 9000 });
+      return;
+    }
+
+    const reason = typeof res.error === "string" ? res.error : "unknown";
+    setStatus(`⚠️ Import: ${reason}`, { clearAfterMs: 6500 });
+  } catch (e) {
+    setStatus("⛔ Import error", { clearAfterMs: 6500 });
+    console.error("[instant-omnivore-add] importBookmarks failed", e);
+  } finally {
+    if (importBookmarksBtn) importBookmarksBtn.disabled = false;
+  }
+});
 
 // Hide API key by default (password field), but reveal while focused.
 apiKeyEl.addEventListener("focus", () => {

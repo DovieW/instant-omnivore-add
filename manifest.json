@@ -12,6 +12,7 @@
   "permissions": [
     "storage",
     "alarms",
+    "bookmarks",
     "scripting",
     "tabs"
   ],
