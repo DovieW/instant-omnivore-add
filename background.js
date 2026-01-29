@@ -347,6 +347,71 @@ function isHttpUrl(url) {
   }
 }
 
+function normalizeLabelName(raw) {
+  if (typeof raw !== "string") return "";
+  return raw.trim().toLowerCase();
+}
+
+function normalizePathPrefix(pathname) {
+  if (typeof pathname !== "string") return "/";
+  let p = pathname.trim();
+  if (!p.startsWith("/")) p = `/${p}`;
+  // Collapse trailing slashes, but keep root as '/'
+  p = p.replace(/\/+$/, "");
+  return p || "/";
+}
+
+function extractOmnivoreReaderRoute(tabUrl, webServerUrl) {
+  // Supports Omnivore reader URLs like:
+  // - /me/<slug>
+  // - /<username>/<slug>
+  // under the configured web server origin (and optional base path).
+  if (!tabUrl || typeof tabUrl !== "string") return null;
+  if (!webServerUrl || typeof webServerUrl !== "string") return null;
+
+  try {
+    const tab = new URL(tabUrl);
+    const base = new URL(webServerUrl);
+
+    // Must be the same origin as the configured web server.
+    if (tab.origin !== base.origin) return null;
+
+    const basePath = normalizePathPrefix(base.pathname);
+    const tabPath = tab.pathname || "/";
+
+    // Ensure the tab path lives under the base path.
+    const basePrefix = basePath === "/" ? "/" : `${basePath}/`;
+    if (!tabPath.startsWith(basePrefix)) return null;
+
+    const relative = tabPath.slice(basePrefix.length); // may be ''
+    const parts = relative.split("/").filter(Boolean);
+
+    // /me/<slug>
+    if (parts.length >= 2 && parts[0] === "me") {
+      const slug = parts[1] ? decodeURIComponent(parts[1]) : "";
+      return slug ? { username: "me", slug } : null;
+    }
+
+    // /<username>/<slug>
+    if (parts.length >= 2) {
+      const username = parts[0] ? decodeURIComponent(parts[0]) : "";
+      const slug = parts[1] ? decodeURIComponent(parts[1]) : "";
+      if (!username || !slug) return null;
+
+      // Avoid matching obvious non-reader routes that sometimes have 2 segments.
+      // (Best-effort; if Omnivore adds more, this still defaults to allowing.)
+      const blockedFirst = new Set(["settings", "login", "signup", "auth", "api", "share", "help"]);
+      if (blockedFirst.has(username.toLowerCase())) return null;
+
+      return { username, slug };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function asBearerToken(raw) {
   if (typeof raw !== "string") return "";
   const t = raw.trim();
@@ -609,6 +674,24 @@ async function omnivoreGraphQL({ apiServerUrl, apiKey, query, variables }) {
   }
 }
 
+async function omnivoreGraphQLWithBearerFallback({ apiServerUrl, apiKey, query, variables }) {
+  // Some Omnivore deployments expect `Authorization: Bearer <token>`.
+  // Our save flow already does a targeted fallback; this helper does the same
+  // for the retagging APIs.
+  const first = await omnivoreGraphQL({ apiServerUrl, apiKey, query, variables });
+  if (first.ok) return first;
+
+  // If the key already has Bearer, nothing to do.
+  if (/^bearer\s+/i.test(apiKey || "")) return first;
+
+  const bearerKey = asBearerToken(apiKey);
+  if (!bearerKey || bearerKey === apiKey) return first;
+
+  // Only retry once.
+  const second = await omnivoreGraphQL({ apiServerUrl, apiKey: bearerKey, query, variables });
+  return second.ok ? second : first;
+}
+
 const MUTATION_SAVE_URL = `
 mutation SaveUrl($input: SaveUrlInput!) {
   saveUrl(input: $input) {
@@ -632,61 +715,274 @@ mutation SavePage($input: SavePageInput!) {
 }
 `;
 
-async function savePageToOmnivoreForUrl({ url, title, label, source = "bookmark-import" }) {
+const QUERY_GET_ARTICLE_LABELS = `
+query GetArticleLabels($username: String!, $slug: String!) {
+  article(username: $username, slug: $slug) {
+    ... on ArticleSuccess {
+      article {
+        id
+        labels { id name }
+      }
+    }
+    ... on ArticleError { errorCodes }
+  }
+}
+`;
+
+const QUERY_GET_LABELS = `
+query GetLabels {
+  labels {
+    ... on LabelsSuccess { labels { id name } }
+    ... on LabelsError { errorCodes }
+  }
+}
+`;
+
+const MUTATION_CREATE_LABEL = `
+mutation CreateLabel($input: CreateLabelInput!) {
+  createLabel(input: $input) {
+    ... on CreateLabelSuccess { label { id name } }
+    ... on CreateLabelError { errorCodes }
+  }
+}
+`;
+
+const MUTATION_SET_LABELS = `
+mutation SetLabels($input: SetLabelsInput!) {
+  setLabels(input: $input) {
+    ... on SetLabelsSuccess { labels { id name } }
+    ... on SetLabelsError { errorCodes }
+  }
+}
+`;
+
+async function ensureLabelIdByName(labelName) {
+  // Returns { ok: true, id } or { ok: false, error }
+  const targetNorm = normalizeLabelName(labelName);
+  if (!targetNorm) return { ok: false, error: "missing-label" };
+
+  // 1) Fetch existing labels.
+  const labelsRes = await omnivoreGraphQLWithBearerFallback({
+    apiServerUrl: cachedApiServerUrl,
+    apiKey: cachedApiKey,
+    query: QUERY_GET_LABELS,
+    variables: {},
+  });
+
+  if (!labelsRes.ok) return { ok: false, error: "labels-query-failed", detail: labelsRes };
+
+  const all = labelsRes.data?.labels?.labels;
+  const list = Array.isArray(all) ? all : [];
+  const existing = list.find((l) => normalizeLabelName(l?.name) === targetNorm);
+  if (existing?.id) return { ok: true, id: existing.id };
+
+  // 2) Create label.
+  const createRes = await omnivoreGraphQLWithBearerFallback({
+    apiServerUrl: cachedApiServerUrl,
+    apiKey: cachedApiKey,
+    query: MUTATION_CREATE_LABEL,
+    variables: { input: { name: labelName.trim() } },
+  });
+
+  if (!createRes.ok) return { ok: false, error: "label-create-failed", detail: createRes };
+
+  const createdId = createRes.data?.createLabel?.label?.id;
+  if (createdId) return { ok: true, id: createdId };
+
+  const codes = Array.isArray(createRes.data?.createLabel?.errorCodes)
+    ? createRes.data.createLabel.errorCodes
+    : [];
+
+  // If a race created it, re-fetch and find.
+  if (codes.includes("LABEL_ALREADY_EXISTS")) {
+    const retry = await omnivoreGraphQLWithBearerFallback({
+      apiServerUrl: cachedApiServerUrl,
+      apiKey: cachedApiKey,
+      query: QUERY_GET_LABELS,
+      variables: {},
+    });
+    if (retry.ok) {
+      const again = Array.isArray(retry.data?.labels?.labels) ? retry.data.labels.labels : [];
+      const found = again.find((l) => normalizeLabelName(l?.name) === targetNorm);
+      if (found?.id) return { ok: true, id: found.id };
+    }
+  }
+
+  return { ok: false, error: "label-create-error", errorCodes: codes };
+}
+
+async function applySlotLabelToCurrentReaderPage(slotIndex, tab) {
   await ensureSettingsLoaded();
 
+  if (!tab?.url || typeof tab.url !== "string") return false;
+  if (!cachedWebServerUrl) return false;
+
+  const route = extractOmnivoreReaderRoute(tab.url, cachedWebServerUrl);
+  if (!route?.slug) return false;
+
+  const labelName = (cachedLabels?.[slotIndex] || "").trim();
+  if (!labelName) {
+    await recordLastOutcome({ type: "missing-slot-label", slotIndex, slug, url: tab.url });
+    await showWarnBadge();
+    return true;
+  }
+
   if (!cachedApiServerUrl || !cachedApiKey) {
-    return { ok: false, error: "missing-config" };
+    await recordLastOutcome({ type: "missing-config" });
+    await showWarnBadge();
+    return true;
   }
 
-  if (!isHttpUrl(url)) {
-    return { ok: false, error: "unsupported-url" };
-  }
+  const targetNorm = normalizeLabelName(labelName);
+  const otherShortcutLabelNames = new Set(
+    (cachedLabels || [])
+      .map((l) => normalizeLabelName(l))
+      .filter(Boolean)
+      .filter((n) => n !== targetNorm)
+  );
 
-  const cleanTitle = (title || "").trim() || url;
-
-  // Best-effort: fetch HTML in the background. If it fails (CORS, blocked, non-HTML),
-  // still send a minimal HTML shell.
-  let originalContent = await fetchPageHtml(url);
-  if (!originalContent) {
-    originalContent = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(
-      cleanTitle
-    )}</title></head><body></body></html>`;
-  }
-
-  const clientRequestId = newClientRequestId();
-  const input = {
-    clientRequestId,
-    source,
-    url,
-    title: cleanTitle,
-    originalContent,
-    ...(label ? { labels: [{ name: label }] } : {}),
-  };
-
-  const tryOnce = async (apiKey) =>
-    omnivoreGraphQL({
+  // Fetch the current article + its labels.
+  // Important: the reader can be rendered at /<username>/<slug> even when the
+  // GraphQL API expects username="me" for the currently authenticated viewer.
+  // So we try "me" first, then fall back to the route username.
+  const tryGetArticle = async (username) =>
+    omnivoreGraphQLWithBearerFallback({
       apiServerUrl: cachedApiServerUrl,
-      apiKey,
-      query: MUTATION_SAVE_PAGE,
-      variables: { input },
+      apiKey: cachedApiKey,
+      query: QUERY_GET_ARTICLE_LABELS,
+      variables: { username, slug: route.slug },
     });
 
-  let result = await tryOnce(cachedApiKey);
-  if (!result.ok) return result;
+  let articleRes = await tryGetArticle("me");
+  let articleErrorCodes =
+    Array.isArray(articleRes.data?.article?.errorCodes) ? articleRes.data.article.errorCodes : [];
 
-  const saveResult = result.data?.savePage ?? null;
-  const typename = saveResult?.__typename;
+  if ((!articleRes.ok || articleErrorCodes.includes("NOT_FOUND")) && route.username && route.username !== "me") {
+    const fallback = await tryGetArticle(route.username);
+    const fallbackCodes =
+      Array.isArray(fallback.data?.article?.errorCodes) ? fallback.data.article.errorCodes : [];
 
-  if (typename === "SaveSuccess") return { ok: true };
-
-  if (typename === "SaveError") {
-    const errorCodes = Array.isArray(saveResult?.errorCodes) ? saveResult.errorCodes : [];
-    const message = typeof saveResult?.message === "string" ? saveResult.message : "";
-    return { ok: false, error: "save-error", errorCodes, message };
+    // Prefer the fallback if it succeeded or if it has fewer errors.
+    if (fallback.ok && !fallbackCodes.length) {
+      articleRes = fallback;
+      articleErrorCodes = fallbackCodes;
+    }
   }
 
-  return { ok: false, error: "api-error", data: result.data, raw: result.raw };
+  if (!articleRes.ok) {
+    await recordLastOutcome({
+      type: "api-error",
+      error: articleRes.error,
+      message: articleRes.message,
+      detail: articleRes,
+      slug: route.slug,
+      username: route.username,
+    });
+    console.error("[instant-omnivore-add] GetArticleLabels failed", articleRes);
+    await showErrorBadge();
+    return true;
+  }
+
+  if (articleErrorCodes.length) {
+    await recordLastOutcome({
+      type: "api-error",
+      error: "article-error",
+      errorCodes: articleErrorCodes,
+      slug: route.slug,
+      username: route.username,
+    });
+    console.warn("[instant-omnivore-add] GetArticleLabels returned errorCodes", articleErrorCodes);
+    await showWarnBadge();
+    return true;
+  }
+
+  const article = articleRes.data?.article?.article;
+  const pageId = article?.id;
+  if (!pageId) {
+    await recordLastOutcome({ type: "api-error", error: "article-not-found", slug: route.slug, username: route.username });
+    await showWarnBadge();
+    return true;
+  }
+
+  const currentLabels = Array.isArray(article?.labels) ? article.labels : [];
+
+  const labelIdRes = await ensureLabelIdByName(labelName);
+  if (!labelIdRes.ok || !labelIdRes.id) {
+    await recordLastOutcome({ type: "api-error", error: labelIdRes.error, detail: labelIdRes });
+    await showErrorBadge();
+    return true;
+  }
+
+  const targetId = labelIdRes.id;
+
+  // Keep all existing labels except those that match *other* shortcut labels.
+  // Ensure the target label is included.
+  const kept = [];
+  for (const l of currentLabels) {
+    const id = l?.id;
+    const nm = normalizeLabelName(l?.name);
+    if (!id) continue;
+    if (nm && otherShortcutLabelNames.has(nm)) continue;
+    kept.push(id);
+  }
+
+  if (!kept.includes(targetId)) kept.push(targetId);
+
+  // De-dupe while preserving order.
+  const seen = new Set();
+  const finalLabelIds = [];
+  for (const id of kept) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    finalLabelIds.push(id);
+  }
+
+  const setRes = await omnivoreGraphQLWithBearerFallback({
+    apiServerUrl: cachedApiServerUrl,
+    apiKey: cachedApiKey,
+    query: MUTATION_SET_LABELS,
+    variables: {
+      input: {
+        pageId,
+        labelIds: finalLabelIds,
+        // Omnivore validates `source` very strictly for SetLabelsInput.
+        // Allowed values are: "user", "system", or "rule:<name>".
+        // Leaving it out defaults to "user" server-side.
+      },
+    },
+  });
+
+  if (!setRes.ok) {
+    await recordLastOutcome({
+      type: "api-error",
+      error: setRes.error,
+      message: setRes.message,
+      detail: setRes,
+      pageId,
+      slug: route.slug,
+    });
+    console.error("[instant-omnivore-add] SetLabels request failed", setRes);
+    await showErrorBadge();
+    return true;
+  }
+
+  const errorCodes = Array.isArray(setRes.data?.setLabels?.errorCodes) ? setRes.data.setLabels.errorCodes : [];
+  if (errorCodes.length) {
+    await recordLastOutcome({
+      type: "api-error",
+      error: "set-labels-error",
+      errorCodes,
+      pageId,
+      slug: route.slug,
+      finalLabelIds,
+    });
+    console.warn("[instant-omnivore-add] SetLabels returned errorCodes", { errorCodes, pageId, finalLabelIds });
+    await showWarnBadge();
+    return true;
+  }
+
+  await showOkBadge();
+  return true;
 }
 
 async function saveUrlToOmnivore({ url, title, label }) {
@@ -705,7 +1001,8 @@ async function saveUrlToOmnivore({ url, title, label }) {
     clientRequestId,
     source: "bookmark-import",
     url,
-    title: (title || "").trim() || url,
+    // NOTE: Omnivore's GraphQL `SaveUrlInput` does NOT accept `title`.
+    // If you want to send a title, you must use `savePage` (which includes `title`).
     ...(label ? { labels: [{ name: label }] } : {}),
   };
 
@@ -768,33 +1065,6 @@ async function saveUrlToOmnivore({ url, title, label }) {
   return { ok: false, error: "api-error", data: result.data, raw: result.raw };
 }
 
-async function saveBookmarkToOmnivorePreferUrl({ url, title, label }) {
-  // Prefer saveUrl for speed during imports, but fall back to savePage for reliability.
-  // We only do the heavier savePage path when saveUrl fails.
-  const r = await saveUrlToOmnivore({ url, title, label });
-  if (r.ok) return r;
-
-  const msg = typeof r.message === "string" ? r.message : "";
-  const shouldFallback =
-    r.error === "graphql" ||
-    r.error === "network" ||
-    (r.error === "http" && Number(r.status) >= 500) ||
-    /unexpected server error/i.test(msg);
-
-  if (!shouldFallback) return r;
-
-  const fallback = await savePageToOmnivoreForUrl({ url, title, label, source: "bookmark-import" });
-  if (fallback.ok) {
-    console.info("[instant-omnivore-add] savePage fallback succeeded for import", url);
-    return fallback;
-  }
-
-  // Return the fallback result only if it contains more useful information; otherwise keep original.
-  const fbMsg = typeof fallback.message === "string" ? fallback.message : "";
-  if (fbMsg && fbMsg !== msg) return fallback;
-  return r;
-}
-
 function describeImportFailure(r) {
   if (!r || typeof r !== "object") return "unknown";
   if (r.error === "graphql" || r.error === "http") {
@@ -841,7 +1111,7 @@ async function importBookmarksFromFolder({ folderPath, label }) {
   const errors = [];
 
   for (const b of attemptedItems) {
-    const r = await saveBookmarkToOmnivorePreferUrl({ url: b.url, title: b.title, label: cleanLabel });
+    const r = await saveUrlToOmnivore({ url: b.url, title: b.title, label: cleanLabel });
     if (r.ok) {
       added += 1;
     } else {
@@ -914,6 +1184,15 @@ async function saveToSlot(slotIndex) {
 
   const tab = await getActiveTab();
   if (!tab?.id) return;
+
+  // Special behavior: if the user is on an Omnivore reader page (based on the
+  // configured web server URL), treat save shortcuts as label/tag toggles for
+  // the current article instead of saving the reader URL as a new page.
+  //
+  // When applying a slot label, we also remove any labels that correspond to
+  // *other* shortcuts (exclusive shortcut tags).
+  const handledReader = await applySlotLabelToCurrentReaderPage(slotIndex, tab);
+  if (handledReader) return;
 
   const hovered = getRecentHoveredLinkFromCache(tab.id) ?? (await getHoveredLinkFromTab(tab.id));
   const usedHoveredLink = Boolean(hovered?.url);
@@ -994,7 +1273,9 @@ async function saveToSlot(slotIndex) {
 
     // Optional behavior: close the tab after saving the *current tab*.
     // Never closes when saving a hovered link.
-    if (!usedHoveredLink && cachedCloseTabAfterSave && tab?.id && !isNewTabUrl(tab.url)) {
+    // Hard-coded safety: never auto-close Omnivore reader tabs (retagging scenario).
+    const isOmnivoreReaderPage = Boolean(extractOmnivoreReaderRoute(tab?.url, cachedWebServerUrl));
+    if (!usedHoveredLink && cachedCloseTabAfterSave && tab?.id && !isNewTabUrl(tab.url) && !isOmnivoreReaderPage) {
       try {
         await chrome.tabs.remove(tab.id);
       } catch {
