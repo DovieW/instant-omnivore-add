@@ -36,6 +36,7 @@ const deleteOnOpenEl = document.getElementById("deleteOnOpen");
 const bookmarkFolderPathEl = document.getElementById("bookmarkFolderPath");
 const bookmarkImportLabelEl = document.getElementById("bookmarkImportLabel");
 const importBookmarksBtn = document.getElementById("importBookmarks");
+const exportAllBtn = document.getElementById("exportAll");
 
 const inputs = Array.from({ length: SLOT_COUNT }, (_, i) => document.getElementById(`slot${i + 1}`));
 
@@ -64,6 +65,28 @@ function writeUI(values) {
   for (let i = 0; i < inputs.length; i++) {
     inputs[i].value = typeof values?.[i] === "string" ? values[i] : "";
   }
+}
+
+function downloadJsonFile({ filename, data }) {
+  const text = JSON.stringify(data, null, 2);
+  const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 2000);
+}
+
+function fallbackExportFilename() {
+  return `omnivore-export-${new Date().toISOString().replace(/[.:]/g, "-")}.json`;
 }
 
 async function load() {
@@ -272,6 +295,56 @@ importBookmarksBtn?.addEventListener("click", async () => {
     console.error("[instant-omnivore-add] importBookmarks failed", e);
   } finally {
     if (importBookmarksBtn) importBookmarksBtn.disabled = false;
+  }
+});
+
+exportAllBtn?.addEventListener("click", async () => {
+  // Persist any pending settings first (especially server/key).
+  await save({ silent: true });
+
+  try {
+    exportAllBtn.disabled = true;
+    setStatus("Exporting library…", { clearAfterMs: 0 });
+
+    const res = await chrome.runtime.sendMessage({
+      type: "instant-omnivore:exportAll",
+    });
+
+    if (!res || typeof res !== "object") {
+      setStatus("⛔ Export failed", { clearAfterMs: 6500 });
+      return;
+    }
+
+    if (!res.ok) {
+      const reason = typeof res.error === "string" ? res.error : "unknown";
+      const msg = typeof res.message === "string" && res.message ? ` — ${res.message}` : "";
+      setStatus(`⚠️ Export failed: ${reason}${msg}`, { clearAfterMs: 8000 });
+      return;
+    }
+
+    const items = Array.isArray(res.items) ? res.items : [];
+    const count = Number.isFinite(Number(res.count)) ? Number(res.count) : items.length;
+    const exportedAt = typeof res.exportedAt === "string" && res.exportedAt ? res.exportedAt : new Date().toISOString();
+    const filename = typeof res.filename === "string" && res.filename.trim() ? res.filename.trim() : fallbackExportFilename();
+
+    const payload = {
+      meta: {
+        source: "instant-omnivore-add",
+        version: 1,
+        exportedAt,
+        apiServerUrl: (apiServerUrlEl?.value || "").trim(),
+        count,
+      },
+      items,
+    };
+
+    downloadJsonFile({ filename, data: payload });
+    setStatus(`✓ Exported ${count} items`, { clearAfterMs: 8000 });
+  } catch (e) {
+    setStatus("⛔ Export error", { clearAfterMs: 8000 });
+    console.error("[instant-omnivore-add] exportAll failed", e);
+  } finally {
+    exportAllBtn.disabled = false;
   }
 });
 

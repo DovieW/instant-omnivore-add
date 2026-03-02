@@ -1162,6 +1162,33 @@ query Search($after: String, $first: Int, $query: String) {
 }
 `;
 
+const QUERY_EXPORT_LIBRARY_PAGE = `
+query ExportLibraryPage($after: String, $first: Int, $query: String) {
+  search(first: $first, after: $after, query: $query, includeContent: false) {
+    __typename
+    ... on SearchSuccess {
+      edges {
+        cursor
+        node {
+          id
+          title
+          slug
+          url
+          createdAt
+          savedAt
+          updatedAt
+          state
+          isArchived
+          labels { name }
+        }
+      }
+      pageInfo { hasNextPage endCursor totalCount }
+    }
+    ... on SearchError { errorCodes }
+  }
+}
+`;
+
 const MUTATION_REMOVE_BOOKMARK = `
 mutation SetBookmarkArticle($input: SetBookmarkArticleInput!) {
   setBookmarkArticle(input: $input) {
@@ -1170,6 +1197,125 @@ mutation SetBookmarkArticle($input: SetBookmarkArticleInput!) {
   }
 }
 `;
+
+function normalizeExportLabels(rawLabels) {
+  if (!Array.isArray(rawLabels)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const l of rawLabels) {
+    const name = typeof l?.name === "string" ? l.name.trim() : "";
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+function mapExportNode(node) {
+  return {
+    id: typeof node?.id === "string" ? node.id : "",
+    url: typeof node?.url === "string" ? node.url : "",
+    title: typeof node?.title === "string" ? node.title : "",
+    slug: typeof node?.slug === "string" ? node.slug : "",
+    labels: normalizeExportLabels(node?.labels),
+    state: typeof node?.state === "string" ? node.state : "",
+    isArchived: Boolean(node?.isArchived),
+    savedAt: typeof node?.savedAt === "string" ? node.savedAt : "",
+    createdAt: typeof node?.createdAt === "string" ? node.createdAt : "",
+    updatedAt: typeof node?.updatedAt === "string" ? node.updatedAt : "",
+  };
+}
+
+function buildExportFilename(tsIso) {
+  const raw = typeof tsIso === "string" && tsIso ? tsIso : new Date().toISOString();
+  return `omnivore-export-${raw.replace(/[.:]/g, "-")}.json`;
+}
+
+async function exportAllLibraryData() {
+  await ensureSettingsLoaded();
+
+  if (!cachedApiServerUrl || !cachedApiKey) {
+    return { ok: false, error: "missing-config" };
+  }
+
+  const perPage = 100;
+  const queryString = "sort:saved-ASC";
+
+  let after = null;
+  let hasNextPage = true;
+  let pageCount = 0;
+  let totalCount = null;
+  const items = [];
+
+  while (hasNextPage) {
+    pageCount += 1;
+    if (pageCount > 5000) {
+      return { ok: false, error: "pagination-guard" };
+    }
+
+    const res = await omnivoreGraphQLWithBearerFallback({
+      apiServerUrl: cachedApiServerUrl,
+      apiKey: cachedApiKey,
+      query: QUERY_EXPORT_LIBRARY_PAGE,
+      variables: { first: perPage, after, query: queryString },
+    });
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: typeof res.error === "string" ? res.error : "api-error",
+        message: typeof res.message === "string" ? res.message : "",
+      };
+    }
+
+    const search = res.data?.search;
+    if (!search || typeof search !== "object") {
+      return { ok: false, error: "invalid-response" };
+    }
+
+    if (search.__typename === "SearchError") {
+      const codes = Array.isArray(search.errorCodes) ? search.errorCodes : [];
+      return {
+        ok: false,
+        error: "search-error",
+        message: codes.join(", ") || "Search returned an error",
+      };
+    }
+
+    const edges = Array.isArray(search.edges) ? search.edges : [];
+    for (const edge of edges) {
+      const node = edge?.node;
+      if (!node || typeof node !== "object") continue;
+
+      const mapped = mapExportNode(node);
+      if (!mapped.url || !mapped.id) continue;
+      items.push(mapped);
+    }
+
+    const pageInfo = search.pageInfo && typeof search.pageInfo === "object" ? search.pageInfo : {};
+    if (totalCount === null && Number.isFinite(Number(pageInfo.totalCount))) {
+      totalCount = Number(pageInfo.totalCount);
+    }
+
+    const endCursor = typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null;
+    hasNextPage = Boolean(pageInfo.hasNextPage && endCursor);
+    after = endCursor;
+
+    if (hasNextPage) {
+      await sleep(15);
+    }
+  }
+
+  const exportedAt = new Date().toISOString();
+  return {
+    ok: true,
+    exportedAt,
+    filename: buildExportFilename(exportedAt),
+    count: items.length,
+    totalCount: Number.isFinite(totalCount) ? Number(totalCount) : items.length,
+    items,
+  };
+}
 
 async function saveToSlot(slotIndex) {
   await ensureSettingsLoaded();
@@ -1507,6 +1653,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(res);
       } catch (e) {
         console.error("[instant-omnivore-add] importBookmarks crashed", e);
+        sendResponse({ ok: false, error: "exception" });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === "instant-omnivore:exportAll") {
+    (async () => {
+      try {
+        const res = await exportAllLibraryData();
+        sendResponse(res);
+      } catch (e) {
+        console.error("[instant-omnivore-add] exportAll crashed", e);
         sendResponse({ ok: false, error: "exception" });
       }
     })();

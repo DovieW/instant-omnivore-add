@@ -84,6 +84,11 @@ body {
   cursor: pointer;
 }
 
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .btn--primary {
   background: var(--primary);
   border-color: rgba(255, 255, 255, 0.1);
@@ -320,6 +325,28 @@ body {
 }
 
 .import__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.export {
+  display: grid;
+  gap: 8px;
+}
+
+.export__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.export__hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.export__actions {
   display: flex;
   justify-content: flex-end;
 }
