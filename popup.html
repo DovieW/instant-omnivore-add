@@ -8,6 +8,38 @@
   </head>
   <body>
     <div class="app">
+      <section id="consentScreen" class="consent" aria-labelledby="consentTitle">
+        <h1 id="consentTitle">Before you begin</h1>
+        <p>
+          Instant Omnivore Add needs access to pages you visit so its keyboard shortcuts can save the link under your
+          pointer or the active page.
+        </p>
+        <ul>
+          <li>It observes hovered link URLs and titles while enabled.</li>
+          <li>When you trigger a save, it may read the active page URL, title, and HTML.</li>
+          <li>Bookmark import reads only the folder you choose after Chrome asks for bookmark permission.</li>
+          <li>Library export retrieves your Omnivore item metadata and downloads it locally as JSON.</li>
+          <li>Your server URLs and preferences use Chrome sync; your API token and consent stay on this device.</li>
+        </ul>
+        <p>
+          Saved page data, bookmark URLs, library requests, and your API token are sent only to the Omnivore server
+          you configure. The developer receives no browsing or library data and uses none for advertising or sale.
+        </p>
+        <label class="consent__check" for="consentCheckbox">
+          <input id="consentCheckbox" type="checkbox" />
+          <span>I understand and consent to this data handling.</span>
+        </label>
+        <div class="consent__actions">
+          <a
+            href="https://github.com/DovieW/instant-omnivore-add/blob/master/PRIVACY.md"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Read the privacy policy</a>
+          <button id="consentAgree" class="btn btn--primary" type="button" disabled>Agree and continue</button>
+        </div>
+      </section>
+
+      <div id="mainApp" hidden>
       <header class="header">
         <div class="titleblock">
           <h1>Instant Omnivore Add</h1>
@@ -77,7 +109,7 @@
                   placeholder="Paste your API token here"
                 />
                 <div class="field__hint">
-                  Stored in Chrome sync storage. Whatever you paste is sent as the <code>Authorization</code> header.
+                  Stored only in Chrome local extension storage on this device. Whatever you paste is sent as the <code>Authorization</code> header.
                 </div>
               </div>
             </div>
@@ -223,6 +255,14 @@
           </div>
         </section>
       </main>
+        <footer class="footer">
+          <a
+            href="https://github.com/DovieW/instant-omnivore-add/blob/master/PRIVACY.md"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Privacy policy</a>
+        </footer>
+      </div>
     </div>
 
     <script src="popup.js"></script>

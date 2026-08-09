@@ -2,6 +2,10 @@
 
 Manifest V3 Chrome extension to instantly add links to an Omnivore library using keyboard shortcuts.
 
+[Download the latest release](https://github.com/DovieW/instant-omnivore-add/releases/latest) ·
+[Privacy policy](./PRIVACY.md) ·
+[Chrome Web Store listing sheet](./docs/CHROME_STORE_LISTING.md)
+
 You configure **7 slots → 7 label names**. When you press a shortcut:
 
 - If your mouse is hovering a link, the extension saves **that link**.
@@ -19,6 +23,7 @@ There are also **7 additional shortcuts** (one per slot) that:
 2. Enable **Developer mode**
 3. Click **Load unpacked**
 4. Select this repository folder
+5. Review and accept the in-extension data disclosure
 
 ## Configure
 
@@ -30,6 +35,21 @@ Open the extension popup:
 - **Slot labels**: label name per number shortcut (optional)
 
 If a label doesn’t exist, Omnivore will create it when saving.
+
+The API token is stored only in Chrome local extension storage. Other settings
+may use Chrome sync. Bookmark permission is requested only when you use bookmark
+folder import. See the [privacy policy](./PRIVACY.md) for the complete data flow.
+
+## Package a release
+
+Run:
+
+```bash
+./scripts/package-release.sh
+```
+
+The reviewed Chrome Web Store ZIP is written to `dist/` with `manifest.json` at
+its root. The script prints the artifact's SHA-256 digest after validation.
 
 ## Keyboard shortcuts
 

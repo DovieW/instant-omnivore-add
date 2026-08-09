@@ -9,6 +9,8 @@ const OPEN_IN_ORIGINAL_KEY = "instantOmnivore.openPulledInOriginal.v1";
 const DELETE_ON_OPEN_KEY = "instantOmnivore.deleteOnOpen.v1";
 const CLOSE_TAB_KEY = "instantOmnivore.closeTabAfterSave.v1";
 const EXCLUDED_DOMAINS_KEY = "instantOmnivore.excludedDomains.v1";
+const DATA_CONSENT_KEY = "instantOmnivore.dataConsent.v1";
+const DATA_CONSENT_VERSION = 1;
 
 const DEFAULT_EXCLUDED_DOMAINS = "mail.google.com, www.google.com";
 
@@ -35,6 +37,9 @@ let cachedDeleteOnOpen = false;
 let cachedCloseTabAfterSave = false;
 let cachedExcludedDomainsRaw = "";
 let cachedExcludedDomains = [];
+let cachedDataConsent = false;
+let dataConsentLoaded = false;
+let dataConsentLoadPromise = null;
 let settingsLoaded = false;
 let settingsLoadPromise = null;
 
@@ -111,6 +116,28 @@ function parseExcludedDomains(raw) {
   return out;
 }
 
+function hasAcceptedConsent(value) {
+  return value === true || (value && typeof value === "object" && Number(value.version) === DATA_CONSENT_VERSION);
+}
+
+async function ensureDataConsentLoaded() {
+  if (dataConsentLoaded) return cachedDataConsent;
+  if (dataConsentLoadPromise) return dataConsentLoadPromise;
+
+  dataConsentLoadPromise = (async () => {
+    try {
+      const out = await chrome.storage.local.get({ [DATA_CONSENT_KEY]: null });
+      cachedDataConsent = hasAcceptedConsent(out[DATA_CONSENT_KEY]);
+      return cachedDataConsent;
+    } finally {
+      dataConsentLoaded = true;
+      dataConsentLoadPromise = null;
+    }
+  })();
+
+  return dataConsentLoadPromise;
+}
+
 function urlMatchesExcludedDomains(url, excludedDomains) {
   if (!url || typeof url !== "string") return false;
   if (!Array.isArray(excludedDomains) || excludedDomains.length === 0) return false;
@@ -144,6 +171,7 @@ async function recordLastOutcome(outcome) {
 }
 
 async function ensureSettingsLoaded() {
+  if (!(await ensureDataConsentLoaded())) return;
   if (settingsLoaded) return;
   if (settingsLoadPromise) {
     await settingsLoadPromise;
@@ -152,22 +180,32 @@ async function ensureSettingsLoaded() {
 
   settingsLoadPromise = (async () => {
     try {
-      const out = await chrome.storage.sync.get([
-        LABELS_KEY,
-        API_SERVER_URL_KEY,
-        WEB_SERVER_URL_KEY,
-        API_KEY_KEY,
-        OPEN_IN_ORIGINAL_KEY,
-        OPEN_IN_READER_KEY,
-        DELETE_ON_OPEN_KEY,
-        CLOSE_TAB_KEY,
-        EXCLUDED_DOMAINS_KEY,
+      const [out, localOut] = await Promise.all([
+        chrome.storage.sync.get([
+          LABELS_KEY,
+          API_SERVER_URL_KEY,
+          WEB_SERVER_URL_KEY,
+          API_KEY_KEY,
+          OPEN_IN_ORIGINAL_KEY,
+          OPEN_IN_READER_KEY,
+          DELETE_ON_OPEN_KEY,
+          CLOSE_TAB_KEY,
+          EXCLUDED_DOMAINS_KEY,
+        ]),
+        chrome.storage.local.get({ [API_KEY_KEY]: "" }),
       ]);
 
       cachedLabels = normalizeLabels(out[LABELS_KEY] ?? Array(SLOT_COUNT).fill(""));
       cachedApiServerUrl = normalizeUrl(out[API_SERVER_URL_KEY]);
       cachedWebServerUrl = normalizeUrl(out[WEB_SERVER_URL_KEY]);
-      cachedApiKey = normalizeApiKey(out[API_KEY_KEY]);
+      const localApiKey = normalizeApiKey(localOut[API_KEY_KEY]);
+      const legacySyncedApiKey = normalizeApiKey(out[API_KEY_KEY]);
+      cachedApiKey = localApiKey || legacySyncedApiKey;
+
+      if (!localApiKey && legacySyncedApiKey) {
+        await chrome.storage.local.set({ [API_KEY_KEY]: legacySyncedApiKey });
+        await chrome.storage.sync.remove(API_KEY_KEY);
+      }
 
       // Migration:
       // - New installs default to false (open reader).
@@ -195,6 +233,22 @@ async function ensureSettingsLoaded() {
 }
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local") {
+    if (changes?.[DATA_CONSENT_KEY]) {
+      cachedDataConsent = hasAcceptedConsent(changes[DATA_CONSENT_KEY].newValue);
+      dataConsentLoaded = true;
+      if (!cachedDataConsent) {
+        settingsLoaded = false;
+        cachedApiKey = "";
+        lastHoveredByTab.clear();
+      }
+    }
+    if (changes?.[API_KEY_KEY]) {
+      cachedApiKey = normalizeApiKey(changes[API_KEY_KEY].newValue);
+    }
+    return;
+  }
+
   if (areaName !== "sync") return;
 
   if (changes?.[LABELS_KEY]) {
@@ -205,9 +259,6 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
   if (changes?.[WEB_SERVER_URL_KEY]) {
     cachedWebServerUrl = normalizeUrl(changes[WEB_SERVER_URL_KEY].newValue);
-  }
-  if (changes?.[API_KEY_KEY]) {
-    cachedApiKey = normalizeApiKey(changes[API_KEY_KEY].newValue);
   }
   if (changes?.[OPEN_IN_ORIGINAL_KEY]) {
     cachedOpenInOriginal = Boolean(changes[OPEN_IN_ORIGINAL_KEY].newValue);
@@ -822,7 +873,7 @@ async function applySlotLabelToCurrentReaderPage(slotIndex, tab) {
 
   const labelName = (cachedLabels?.[slotIndex] || "").trim();
   if (!labelName) {
-    await recordLastOutcome({ type: "missing-slot-label", slotIndex, slug, url: tab.url });
+    await recordLastOutcome({ type: "missing-slot-label", slotIndex, slug: route.slug, url: tab.url });
     await showWarnBadge();
     return true;
   }
@@ -1081,6 +1132,9 @@ function describeImportFailure(r) {
 }
 
 async function importBookmarksFromFolder({ folderPath, label }) {
+  if (!(await ensureDataConsentLoaded())) {
+    return { ok: false, error: "consent-required" };
+  }
   await ensureSettingsLoaded();
 
   if (!cachedApiServerUrl || !cachedApiKey) {
@@ -1232,6 +1286,9 @@ function buildExportFilename(tsIso) {
 }
 
 async function exportAllLibraryData() {
+  if (!(await ensureDataConsentLoaded())) {
+    return { ok: false, error: "consent-required" };
+  }
   await ensureSettingsLoaded();
 
   if (!cachedApiServerUrl || !cachedApiKey) {
@@ -1318,6 +1375,11 @@ async function exportAllLibraryData() {
 }
 
 async function saveToSlot(slotIndex) {
+  if (!(await ensureDataConsentLoaded())) {
+    await recordLastOutcome({ type: "consent-required" });
+    await showWarnBadge();
+    return;
+  }
   await ensureSettingsLoaded();
 
   const label = (cachedLabels[slotIndex] || "").trim();
@@ -1494,6 +1556,11 @@ function buildOpenUrl({ webServerUrl, openInOriginal, slug, originalUrl }) {
 }
 
 async function openOldestThenRemove(slotIndex) {
+  if (!(await ensureDataConsentLoaded())) {
+    await recordLastOutcome({ type: "consent-required" });
+    await showWarnBadge();
+    return;
+  }
   await ensureSettingsLoaded();
 
   if (!cachedApiServerUrl || !cachedApiKey) {
@@ -1608,13 +1675,13 @@ chrome.commands.onCommand.addListener((command) => {
   void handleCommand(command);
 });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || typeof msg !== "object") return;
+async function handleHoverMessage(msg, sender) {
+  if (!(await ensureDataConsentLoaded())) return;
+
+  const tabId = sender?.tab?.id;
+  if (!Number.isFinite(tabId)) return;
 
   if (msg.type === "instant-omnivore:hoverUpdate") {
-    const tabId = sender?.tab?.id;
-    if (!Number.isFinite(tabId)) return;
-
     const url = typeof msg.url === "string" ? msg.url : "";
     if (!url) return;
 
@@ -1623,24 +1690,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       title: typeof msg.title === "string" ? msg.title : "",
       ts: typeof msg.ts === "number" ? msg.ts : Date.now(),
     });
+    return;
   }
 
-  if (msg.type === "instant-omnivore:hoverClear") {
-    const tabId = sender?.tab?.id;
-    if (!Number.isFinite(tabId)) return;
+  const ts = typeof msg.ts === "number" ? msg.ts : Date.now();
+  const cur = lastHoveredByTab.get(tabId);
 
-    const ts = typeof msg.ts === "number" ? msg.ts : Date.now();
-    const cur = lastHoveredByTab.get(tabId);
+  if (!cur || typeof cur !== "object") {
+    lastHoveredByTab.delete(tabId);
+    return;
+  }
 
-    if (!cur || typeof cur !== "object") {
-      lastHoveredByTab.delete(tabId);
-      return;
-    }
+  const curTs = Number(cur.ts);
+  if (!Number.isFinite(curTs) || ts >= curTs) {
+    lastHoveredByTab.delete(tabId);
+  }
+}
 
-    const curTs = Number(cur.ts);
-    if (!Number.isFinite(curTs) || ts >= curTs) {
-      lastHoveredByTab.delete(tabId);
-    }
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== "object") return;
+
+  if (msg.type === "instant-omnivore:hoverUpdate" || msg.type === "instant-omnivore:hoverClear") {
+    void handleHoverMessage(msg, sender);
+    return;
   }
 
   if (msg.type === "instant-omnivore:importBookmarks") {

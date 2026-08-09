@@ -12,6 +12,8 @@ const EXCLUDED_DOMAINS_KEY = "instantOmnivore.excludedDomains.v1";
 
 const BOOKMARK_IMPORT_FOLDER_KEY = "instantOmnivore.bookmarkImportFolderPath.v1";
 const BOOKMARK_IMPORT_LABEL_KEY = "instantOmnivore.bookmarkImportLabel.v1";
+const DATA_CONSENT_KEY = "instantOmnivore.dataConsent.v1";
+const DATA_CONSENT_VERSION = 1;
 
 const DEFAULT_EXCLUDED_DOMAINS = "mail.google.com, www.google.com";
 
@@ -37,6 +39,10 @@ const bookmarkFolderPathEl = document.getElementById("bookmarkFolderPath");
 const bookmarkImportLabelEl = document.getElementById("bookmarkImportLabel");
 const importBookmarksBtn = document.getElementById("importBookmarks");
 const exportAllBtn = document.getElementById("exportAll");
+const consentScreenEl = document.getElementById("consentScreen");
+const mainAppEl = document.getElementById("mainApp");
+const consentCheckboxEl = document.getElementById("consentCheckbox");
+const consentAgreeBtn = document.getElementById("consentAgree");
 
 const inputs = Array.from({ length: SLOT_COUNT }, (_, i) => document.getElementById(`slot${i + 1}`));
 
@@ -89,25 +95,50 @@ function fallbackExportFilename() {
   return `omnivore-export-${new Date().toISOString().replace(/[.:]/g, "-")}.json`;
 }
 
+function hasAcceptedConsent(value) {
+  return value === true || (value && typeof value === "object" && Number(value.version) === DATA_CONSENT_VERSION);
+}
+
+function showConsentScreen() {
+  consentScreenEl.hidden = false;
+  mainAppEl.hidden = true;
+}
+
+function showMainApp() {
+  consentScreenEl.hidden = true;
+  mainAppEl.hidden = false;
+}
+
 async function load() {
-  const out = await chrome.storage.sync.get([
-    LABELS_KEY,
-    API_SERVER_URL_KEY,
-    WEB_SERVER_URL_KEY,
-    API_KEY_KEY,
-    OPEN_IN_ORIGINAL_KEY,
-    OPEN_IN_READER_KEY,
-    DELETE_ON_OPEN_KEY,
-    CLOSE_TAB_KEY,
-    EXCLUDED_DOMAINS_KEY,
-    BOOKMARK_IMPORT_FOLDER_KEY,
-    BOOKMARK_IMPORT_LABEL_KEY,
+  const [out, localOut] = await Promise.all([
+    chrome.storage.sync.get([
+      LABELS_KEY,
+      API_SERVER_URL_KEY,
+      WEB_SERVER_URL_KEY,
+      API_KEY_KEY,
+      OPEN_IN_ORIGINAL_KEY,
+      OPEN_IN_READER_KEY,
+      DELETE_ON_OPEN_KEY,
+      CLOSE_TAB_KEY,
+      EXCLUDED_DOMAINS_KEY,
+      BOOKMARK_IMPORT_FOLDER_KEY,
+      BOOKMARK_IMPORT_LABEL_KEY,
+    ]),
+    chrome.storage.local.get({ [API_KEY_KEY]: "" }),
   ]);
 
   const labels = normalizeLabels(out[LABELS_KEY] ?? Array(SLOT_COUNT).fill(""));
   const apiServerUrl = typeof out[API_SERVER_URL_KEY] === "string" ? out[API_SERVER_URL_KEY] : "";
   const webServerUrl = typeof out[WEB_SERVER_URL_KEY] === "string" ? out[WEB_SERVER_URL_KEY] : "";
-  const apiKey = typeof out[API_KEY_KEY] === "string" ? out[API_KEY_KEY] : "";
+  const localApiKey = typeof localOut[API_KEY_KEY] === "string" ? localOut[API_KEY_KEY] : "";
+  const legacySyncedApiKey = typeof out[API_KEY_KEY] === "string" ? out[API_KEY_KEY] : "";
+  const apiKey = localApiKey || legacySyncedApiKey;
+
+  // v0.2 migration: keep authentication material on this device rather than in Chrome sync.
+  if (!localApiKey && legacySyncedApiKey) {
+    await chrome.storage.local.set({ [API_KEY_KEY]: legacySyncedApiKey });
+    await chrome.storage.sync.remove(API_KEY_KEY);
+  }
 
   // Migration:
   // - New installs default to false (open reader).
@@ -149,6 +180,10 @@ async function load() {
     const local = await chrome.storage.local.get({ [LAST_OUTCOME_KEY]: null });
     const last = local[LAST_OUTCOME_KEY];
     if (last && typeof last === "object") {
+      if (last.type === "consent-required") {
+        setStatus("⚠️ Accept the data disclosure first", { clearAfterMs: 4500 });
+        await chrome.storage.local.remove(LAST_OUTCOME_KEY);
+      }
       if (last.type === "missing-config") {
         setStatus("⚠️ Set API server + key", { clearAfterMs: 4500 });
         await chrome.storage.local.remove(LAST_OUTCOME_KEY);
@@ -192,11 +227,14 @@ async function save({ silent = false } = {}) {
 
   const openInOriginal = Boolean(openPulledInOriginalEl.checked);
 
+  await chrome.storage.local.set({
+    [API_KEY_KEY]: (apiKeyEl.value || "").trim(),
+  });
+
   await chrome.storage.sync.set({
     [LABELS_KEY]: normalizeLabels(labels),
     [API_SERVER_URL_KEY]: (apiServerUrlEl.value || "").trim(),
     [WEB_SERVER_URL_KEY]: (webServerUrlEl.value || "").trim(),
-    [API_KEY_KEY]: (apiKeyEl.value || "").trim(),
     // Write both keys so older versions stay coherent.
     [OPEN_IN_ORIGINAL_KEY]: openInOriginal,
     [OPEN_IN_READER_KEY]: !openInOriginal,
@@ -206,6 +244,7 @@ async function save({ silent = false } = {}) {
     [BOOKMARK_IMPORT_FOLDER_KEY]: (bookmarkFolderPathEl?.value || "").trim(),
     [BOOKMARK_IMPORT_LABEL_KEY]: (bookmarkImportLabelEl?.value || "").trim(),
   });
+  await chrome.storage.sync.remove(API_KEY_KEY);
 
   if (!silent) setStatus("Saved");
 }
@@ -248,6 +287,14 @@ importBookmarksBtn?.addEventListener("click", async () => {
 
   if (!folderPath || !label) {
     setStatus("⚠️ Enter folder path + label", { clearAfterMs: 4500 });
+    return;
+  }
+
+  // Keep the request directly in the click gesture. Chrome returns true without
+  // another prompt when this optional permission was already granted.
+  const granted = await chrome.permissions.request({ permissions: ["bookmarks"] });
+  if (!granted) {
+    setStatus("⚠️ Bookmark permission is required for import", { clearAfterMs: 6500 });
     return;
   }
 
@@ -356,4 +403,33 @@ apiKeyEl.addEventListener("blur", () => {
   apiKeyEl.type = "password";
 });
 
-void load();
+consentCheckboxEl.addEventListener("change", () => {
+  consentAgreeBtn.disabled = !consentCheckboxEl.checked;
+});
+
+consentAgreeBtn.addEventListener("click", async () => {
+  if (!consentCheckboxEl.checked) return;
+
+  await chrome.storage.local.set({
+    [DATA_CONSENT_KEY]: {
+      version: DATA_CONSENT_VERSION,
+      acceptedAt: new Date().toISOString(),
+    },
+  });
+
+  showMainApp();
+  await load();
+});
+
+async function initialize() {
+  const out = await chrome.storage.local.get({ [DATA_CONSENT_KEY]: null });
+  if (!hasAcceptedConsent(out[DATA_CONSENT_KEY])) {
+    showConsentScreen();
+    return;
+  }
+
+  showMainApp();
+  await load();
+}
+
+void initialize();

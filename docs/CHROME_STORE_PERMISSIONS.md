@@ -26,7 +26,7 @@ We store your settings:
 - Excluded domains list
 
 ### What the user should understand
-Your token is stored in Chrome **sync** storage (so it can sync between browsers if you have sync enabled) and is only used to talk to your configured Omnivore server.
+Your token is stored in Chrome **local** extension storage and is not placed in Chrome sync. Non-authentication settings can sync between browsers when Chrome sync is enabled.
 
 ---
 
@@ -53,7 +53,7 @@ We only act when you trigger a keyboard shortcut (or open/pull behavior). We are
 
 ---
 
-## `bookmarks`
+## Optional `bookmarks`
 
 ### Why it’s needed
 We provide an optional “Bookmark folder → Label” helper in the popup:
@@ -62,7 +62,7 @@ We provide an optional “Bookmark folder → Label” helper in the popup:
 - the extension reads bookmark URLs inside that folder and saves them to Omnivore in bulk
 
 ### What the user should understand
-We only read bookmarks when you click the **Add** button in the popup. The extension uses the bookmark URLs solely to send them to your configured Omnivore server.
+Chrome asks for this optional permission only when you click the **Add** button in the popup. We then read the folder you identify and use its bookmark URLs solely to send them to your configured Omnivore server.
 
 ---
 
@@ -85,6 +85,7 @@ Two reasons:
 
 ### What the user should understand
 - The extension only uses this to support “hovered link” saving and to collect HTML for saving to Omnivore.
+- Hover tracking does not start until the user accepts the in-extension data disclosure.
 - The excluded domains feature is specifically to prevent accidental saving/closing on sites like Gmail or Google Search when you are **not** hovering a link.
 
 ---
@@ -96,9 +97,12 @@ Two reasons:
   - Page title
   - For current-tab saves, the page’s HTML (best-effort) to improve Omnivore save reliability
   - Your Omnivore API token and server URLs (as settings)
+  - Bookmark URLs/titles from a user-selected folder when bookmark import is requested
+  - Omnivore library metadata when the user requests an export or opens a queued item
 
 - **Where does it go?**
   - Sent only to the Omnivore server you configure (GraphQL endpoint `/api/graphql`).
 
 - **When does it run?**
-  - Only when you use the extension (keyboard shortcuts / open-oldest action). Not continuously in the background.
+  - Hovered-link detection runs after affirmative consent so keyboard shortcuts know which link is under the pointer.
+  - Page capture, bookmark reads, API requests, and exports run only after the corresponding user action.

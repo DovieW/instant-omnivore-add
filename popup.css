@@ -23,6 +23,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -39,6 +43,70 @@ body {
 
 .app {
   padding: 14px;
+}
+
+.consent {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--card), var(--card2));
+}
+
+.consent h1,
+.consent p,
+.consent ul {
+  margin: 0;
+}
+
+.consent h1 {
+  font-size: 17px;
+}
+
+.consent p,
+.consent li {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.consent ul {
+  display: grid;
+  gap: 6px;
+  padding-left: 20px;
+}
+
+.consent__check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.consent__check input {
+  margin-top: 2px;
+}
+
+.consent__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.consent__actions a,
+.footer a {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.footer {
+  padding: 10px 2px 0;
+  text-align: right;
 }
 
 .header {
@@ -418,5 +486,4 @@ body {
   display: grid;
   gap: 10px;
 }
-
 

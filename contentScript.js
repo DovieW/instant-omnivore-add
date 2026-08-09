@@ -3,6 +3,9 @@ let lastGoodHover = null;
 let lastSentUrl = null;
 let lastSentAt = 0;
 const HOVER_SEND_MIN_INTERVAL_MS = 200;
+const DATA_CONSENT_KEY = "instantOmnivore.dataConsent.v1";
+const DATA_CONSENT_VERSION = 1;
+let hoverTrackingStarted = false;
 
 function sendHoverClear(reason) {
   const now = Date.now();
@@ -111,64 +114,85 @@ function onPointerMove() {
   }
 }
 
-window.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
-window.addEventListener("mousemove", onPointerMove, { capture: true, passive: true });
+function hasAcceptedConsent(value) {
+  return value === true || (value && typeof value === "object" && Number(value.version) === DATA_CONSENT_VERSION);
+}
 
-window.addEventListener(
-  "pointerleave",
-  () => {
-    lastGoodHover = null;
-    sendHoverClear("pointerleave");
-  },
-  { capture: true, passive: true }
-);
+function startHoverTracking() {
+  if (hoverTrackingStarted) return;
+  hoverTrackingStarted = true;
 
-window.addEventListener(
-  "mouseleave",
-  () => {
-    lastGoodHover = null;
-    sendHoverClear("mouseleave");
-  },
-  { capture: true, passive: true }
-);
+  window.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
+  window.addEventListener("mousemove", onPointerMove, { capture: true, passive: true });
 
-window.addEventListener(
-  "blur",
-  () => {
-    lastGoodHover = null;
-    sendHoverClear("blur");
-  },
-  { capture: true, passive: true }
-);
-
-document.addEventListener(
-  "visibilitychange",
-  () => {
-    if (document.visibilityState !== "visible") {
+  window.addEventListener(
+    "pointerleave",
+    () => {
       lastGoodHover = null;
-      sendHoverClear("hidden");
-    }
-  },
-  { capture: true, passive: true }
-);
+      sendHoverClear("pointerleave");
+    },
+    { capture: true, passive: true }
+  );
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!msg || typeof msg !== "object") return;
+  window.addEventListener(
+    "mouseleave",
+    () => {
+      lastGoodHover = null;
+      sendHoverClear("mouseleave");
+    },
+    { capture: true, passive: true }
+  );
 
-  if (msg.type === "instant-omnivore:getHovered") {
-    const live = getLiveHoveredAnchor();
-    if (live) {
-      lastGoodHover = live;
-      sendResponse({ url: live.url, title: live.title });
+  window.addEventListener(
+    "blur",
+    () => {
+      lastGoodHover = null;
+      sendHoverClear("blur");
+    },
+    { capture: true, passive: true }
+  );
+
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (document.visibilityState !== "visible") {
+        lastGoodHover = null;
+        sendHoverClear("hidden");
+      }
+    },
+    { capture: true, passive: true }
+  );
+
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (!msg || typeof msg !== "object") return;
+
+    if (msg.type === "instant-omnivore:getHovered") {
+      const live = getLiveHoveredAnchor();
+      if (live) {
+        lastGoodHover = live;
+        sendResponse({ url: live.url, title: live.title });
+        return;
+      }
+
+      // Important: do NOT respond with `null` (iframe race behavior).
+      if (lastGoodHover && Date.now() - lastGoodHover.ts < 2500) {
+        sendResponse({ url: lastGoodHover.url, title: lastGoodHover.title });
+        return;
+      }
+
       return;
     }
+  });
+}
 
-    // Important: do NOT respond with `null` (iframe race behavior).
-    if (lastGoodHover && Date.now() - lastGoodHover.ts < 2500) {
-      sendResponse({ url: lastGoodHover.url, title: lastGoodHover.title });
-      return;
-    }
-
-    return;
-  }
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes?.[DATA_CONSENT_KEY]) return;
+  if (hasAcceptedConsent(changes[DATA_CONSENT_KEY].newValue)) startHoverTracking();
 });
+
+async function initializeConsentGate() {
+  const out = await chrome.storage.local.get({ [DATA_CONSENT_KEY]: null });
+  if (hasAcceptedConsent(out[DATA_CONSENT_KEY])) startHoverTracking();
+}
+
+void initializeConsentGate();
